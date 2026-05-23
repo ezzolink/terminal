@@ -1,6 +1,6 @@
 [package]
 name = "ezzo-terminal"
-version = "1.5.0"
+version = "1.5.1"
 description = "EZZO Terminal — Terminal moderno, elegante e translúcido para Windows com suporte a CMD, PowerShell e WSL"
 authors = ["EZZO Digital Inc."]
 edition = "2021"

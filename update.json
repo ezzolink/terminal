@@ -1,1 +1,1 @@
-﻿{ "version": "1.5.0", "notes": "EZZO Terminal v1.5.0 - Lancamento inicial", "pub_date": "2026-05-23T21:30:00Z", "platforms": { "windows-x86_64": { "signature": "", "url": "https://github.com/ezzolink/terminal/releases/download/v1.5.0/EZZO.Terminal_1.5.0_x64-setup.exe" } } }
+﻿{ "version": "1.5.1", "notes": "EZZO Terminal v1.5.1 - Limpeza de SVGs antigos e atualizacao de icones", "pub_date": "2026-05-23T23:12:00Z", "platforms": { "windows-x86_64": { "signature": "", "url": "https://github.com/ezzolink/terminal/releases/download/v1.5.1/EZZO.Terminal_1.5.1_x64-setup.exe" } } }

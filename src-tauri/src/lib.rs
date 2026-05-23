@@ -413,6 +413,42 @@ fn get_system_info(store: tauri::State<'_, SysInfoStore>) -> SystemInfo {
 
 struct SysInfoStore(Mutex<System>);
 
+// ─── Open in Explorer / File Manager ──────────────────────────────────────────
+
+#[tauri::command]
+fn open_in_explorer(path: String) -> Result<(), String> {
+    let trimmed = path.trim_end_matches('/').trim_end_matches('\\');
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("Erro ao abrir explorador: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("Erro ao abrir Finder: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("Erro ao abrir gestor de ficheiros: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_initial_directory() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "C:\\".to_string())
+}
+
 // ─── CLI Args ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -436,6 +472,8 @@ pub fn run() {
             resize_pty,
             kill_pty,
             open_monitor_window,
+            open_in_explorer,
+            get_initial_directory,
             read_clipboard,
             close,
             minimize,

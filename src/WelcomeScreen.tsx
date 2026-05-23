@@ -68,7 +68,7 @@ export default function WelcomeScreen({ onDismiss }: WelcomeScreenProps) {
                         marginBottom: 20,
                     }}
                 >
-                    Versão 1.5.0
+                    Versão 1.5.1
                 </p>
 
                 <div

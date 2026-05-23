@@ -14,6 +14,7 @@ import ezzoLogo from "./assets/logo-azul.png";
 const SystemMonitor = lazy(() => import("./SystemMonitor"));
 const CommandPalette = lazy(() => import("./CommandPalette"));
 const WelcomeScreen = lazy(() => import("./WelcomeScreen"));
+const ExtensionsPanel = lazy(() => import("./ExtensionsPanel"));
 
 // ─── SVG Icons ───────────────────────────────────────────────────────────────
 // ─── Material Icons (Google Material Symbols) ────────────────────────────────
@@ -50,6 +51,8 @@ const IconSplitV = () => <span className="material-symbols-outlined icon-md">hor
 
 const IconSnippet = () => <span className="material-symbols-outlined icon-md">code</span>;
 const IconMonitor = () => <span className="material-symbols-outlined icon-md">monitoring</span>;
+const IconFolder = () => <span className="material-symbols-outlined icon-md">folder_open</span>;
+const IconExtensions = () => <span className="material-symbols-outlined icon-md">extension</span>;
 
 // ─── Types & Constants ───────────────────────────────────────────────────────
 type ShellType = "powershell" | "cmd" | "wsl";
@@ -478,7 +481,7 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
     termRef.current = term;
 
     term.writeln(`\x1b[38;2;59;130;246m+-----------------------------------------------------+\x1b[0m`);
-    term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[1;38;2;96;165;250mEZZO Terminal\x1b[0m  \x1b[38;2;100;116;139mv1.5.0\x1b[0m`);
+    term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[1;38;2;96;165;250mEZZO Terminal\x1b[0m  \x1b[38;2;100;116;139mv1.5.1\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  Shell: \x1b[38;2;34;211;238m${tab.shell === "powershell" ? "PowerShell" : tab.shell === "wsl" ? "WSL" : "CMD"}\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[38;2;100;116;139mCtrl+C/V/A/L/F | Split | Snippets | Search\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m+-----------------------------------------------------+\x1b[0m`);
@@ -846,11 +849,13 @@ export default function App() {
   const [activeId, setActiveId] = useState<string>(() => tabs[0].id);
   const [defaultShell, setDefaultShell] = useState<ShellType>("cmd");
   const [clock, setClock] = useState("");
+  const [currentDirectory, setCurrentDirectory] = useState("");
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [showSnippets, setShowSnippets] = useState(false);
   const [showMonitor, setShowMonitor] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showExtensions, setShowExtensions] = useState(false);
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem("ezzo-welcome-dismissed"));
   const [snippets, setSnippets] = useState<Snippet[]>(loadSnippets);
   const [splitMode, setSplitMode] = useState<"none" | "horizontal" | "vertical">("none");
@@ -894,6 +899,15 @@ export default function App() {
     update();
     const t = setInterval(update, 1000);
     return () => clearInterval(t);
+  }, []);
+
+  // ─── Load initial directory for "Open Folder" button ─────────────
+  useEffect(() => {
+    invoke<string>("get_initial_directory").then((dir) => {
+      setCurrentDirectory(dir);
+    }).catch(() => {
+      setCurrentDirectory("C:\\");
+    });
   }, []);
 
   // ─── Persist tabs to localStorage whenever they change ──────────────────────
@@ -962,6 +976,19 @@ export default function App() {
   const addSnippet = useCallback((s: Snippet) => {
     setSnippets((prev) => {
       const next = [...prev, s];
+      saveSnippets(next);
+      return next;
+    });
+  }, []);
+
+  const installExtensionCommands = useCallback((commands: { name: string; command: string; category: string }[]) => {
+    setSnippets((prev) => {
+      const existingNames = new Set(prev.map((s) => s.name));
+      const newSnippets = commands
+        .filter((c) => !existingNames.has(c.name))
+        .map((c) => ({ id: crypto.randomUUID(), name: c.name, command: c.command, category: c.category }));
+      if (newSnippets.length === 0) return prev;
+      const next = [...prev, ...newSnippets];
       saveSnippets(next);
       return next;
     });
@@ -1044,6 +1071,8 @@ export default function App() {
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Paleta de Comandos", shortcut: "Ctrl+Shift+P", icon: "search", action: () => setShowCommandPalette(true) },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Definições", shortcut: "Ctrl+,", icon: "settings", action: () => { setShowSettings((v) => !v); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Snippets", shortcut: "Ctrl+Shift+S", icon: "snippet", action: () => { setShowSnippets((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Extensões", icon: "extension", action: () => { setShowExtensions((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Abrir Pasta no Explorador", icon: "folder_open", action: () => { invoke("open_in_explorer", { path: currentDirectory || "C:\\" }).catch(() => {}); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Monitor do Sistema", icon: "monitor", action: () => { setShowMonitor((v) => !v); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Abrir Monitor em Janela Separada", icon: "monitor", action: () => { invoke("open_monitor_window"); } },
     { id: cmdId(cmdIdCounterRef), category: "Painéis", label: "Split Vertical", shortcut: "Ctrl+Shift+D", icon: "split", action: () => toggleSplit("vertical") },
@@ -1055,7 +1084,7 @@ export default function App() {
     { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Minimizar", icon: "window", action: () => invoke("minimize").catch(() => { }) },
     { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Maximizar", icon: "window", action: () => invoke("maximize").catch(() => { }) },
     { id: cmdId(cmdIdCounterRef), category: "Ajuda", label: "Atalhos de Teclado", icon: "help", action: () => { setShowCommandPalette(true); } },
-  ], [toggleSplit, addTab, activeId, tabs, closeTab]);
+  ], [toggleSplit, addTab, activeId, tabs, closeTab, currentDirectory]);
 
   // Keyboard shortcuts at app level
   useEffect(() => {
@@ -1094,6 +1123,9 @@ export default function App() {
           <button className="title-bar-btn" onClick={() => toggleSplit("vertical")} title="Split Vertical (Ctrl+Shift+D)" style={splitMode === "vertical" ? { color: "#3b82f6" } : undefined}><IconSplitV /></button>
           <button className="title-bar-btn" onClick={() => toggleSplit("horizontal")} title="Split Horizontal (Ctrl+Shift+H)" style={splitMode === "horizontal" ? { color: "#3b82f6" } : undefined}><IconSplitH /></button>
           <button className="title-bar-btn" onClick={() => setShowSnippets(!showSnippets)} title="Snippets (Ctrl+Shift+S)" style={showSnippets ? { color: "#3b82f6" } : undefined}><IconSnippet /></button>
+          <div className="title-bar-separator" />
+          <button className="title-bar-btn" onClick={() => invoke("open_in_explorer", { path: currentDirectory || "C:\\" }).catch(() => {})} title="Abrir pasta no Explorador" style={{ color: "#f59e0b" }}><IconFolder /></button>
+          <button className="title-bar-btn" onClick={() => setShowExtensions(!showExtensions)} title="Extensoes" style={showExtensions ? { color: "#a855f7" } : undefined}><IconExtensions /></button>
           <button className="title-bar-btn" onClick={() => setShowMonitor(!showMonitor)} title="Monitor do Sistema" style={showMonitor ? { color: "#22c55e" } : undefined}><IconMonitor /></button>
           <button className="title-bar-btn" onClick={() => setShowSettings(!showSettings)} title="Definicoes (Ctrl+,)"><IconGear /></button>
         </div>
@@ -1242,6 +1274,11 @@ export default function App() {
 
 
         {showSettings && <SettingsPanel settings={settings} onChange={handleSettingsChange} onClose={() => setShowSettings(false)} />}
+        {showExtensions && (
+          <Suspense fallback={null}>
+            <ExtensionsPanel onInstallCommands={installExtensionCommands} onClose={() => setShowExtensions(false)} />
+          </Suspense>
+        )}
         {showWelcome && (
           <Suspense fallback={null}>
             <WelcomeScreen onDismiss={() => { localStorage.setItem("ezzo-welcome-dismissed", "1"); setShowWelcome(false); }} />
