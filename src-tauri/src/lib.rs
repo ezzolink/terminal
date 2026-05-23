@@ -449,6 +449,44 @@ fn get_initial_directory() -> String {
         .unwrap_or_else(|_| "C:\\".to_string())
 }
 
+#[derive(Serialize)]
+struct FileEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size_bytes: u64,
+}
+
+#[tauri::command]
+fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
+    let entries = std::fs::read_dir(&path).map_err(|e| format!("Erro ao ler diretório: {}", e))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Erro ao ler entrada: {}", e))?;
+        let meta = entry.metadata().map_err(|e| format!("Erro ao ler metadata: {}", e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Skip hidden files
+        if name.starts_with('.') {
+            continue;
+        }
+        files.push(FileEntry {
+            name,
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir: meta.is_dir(),
+            size_bytes: meta.len(),
+        });
+    }
+    // Sort: directories first, then by name
+    files.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+    Ok(files)
+}
+
 // ─── CLI Args ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -474,6 +512,7 @@ pub fn run() {
             open_monitor_window,
             open_in_explorer,
             get_initial_directory,
+            list_directory,
             read_clipboard,
             close,
             minimize,

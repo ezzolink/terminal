@@ -6,15 +6,19 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, availableMonitors, primaryMonitor } from "@tauri-apps/api/window";
+import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
 import "xterm/css/xterm.css";
 import ezzoLogo from "./assets/logo-azul.png";
+import { useUpdateCheck } from "./UpdateSection";
 
 // ─── Lazy-loaded components (reduz bundle inicial) ─────────────────────────
 const SystemMonitor = lazy(() => import("./SystemMonitor"));
 const CommandPalette = lazy(() => import("./CommandPalette"));
 const WelcomeScreen = lazy(() => import("./WelcomeScreen"));
 const ExtensionsPanel = lazy(() => import("./ExtensionsPanel"));
+const FileExplorer = lazy(() => import("./FileExplorer"));
+const HistorySearch = lazy(() => import("./HistorySearch"));
 
 // ─── SVG Icons ───────────────────────────────────────────────────────────────
 // ─── Material Icons (Google Material Symbols) ────────────────────────────────
@@ -53,6 +57,11 @@ const IconSnippet = () => <span className="material-symbols-outlined icon-md">co
 const IconMonitor = () => <span className="material-symbols-outlined icon-md">monitoring</span>;
 const IconFolder = () => <span className="material-symbols-outlined icon-md">folder_open</span>;
 const IconExtensions = () => <span className="material-symbols-outlined icon-md">extension</span>;
+const IconFileTree = () => <span className="material-symbols-outlined icon-md">folder</span>;
+const IconQuake = () => <span className="material-symbols-outlined icon-md">contract</span>;
+const IconMacro = () => <span className="material-symbols-outlined icon-md">play_circle</span>;
+const IconStats = () => <span className="material-symbols-outlined icon-md">bar_chart</span>;
+
 
 // ─── Types & Constants ───────────────────────────────────────────────────────
 type ShellType = "powershell" | "cmd" | "wsl";
@@ -62,6 +71,12 @@ interface Settings {
   fontSize: number;
   background: "dark" | "light" | "transparent";
   theme: string;
+  skipUpdateVersion: string;
+  autoCheckUpdates: boolean;
+  opacity: number;
+  accentColor: string;
+  terminalPadding: number;
+  customThemeColors?: Record<string, string>;
 }
 
 interface Tab {
@@ -95,6 +110,7 @@ const THEME_OPTIONS = [
   { label: "Tokyo Night", key: "tokyonight" },
   { label: "Gruvbox", key: "gruvbox" },
   { label: "Catppuccin", key: "catppuccin" },
+  { label: "Custom", key: "custom" },
 ];
 
 const BG_THEMES = {
@@ -102,6 +118,17 @@ const BG_THEMES = {
   light: { app: "#f0f2f8", terminal: "#f0f2f8", label: "Claro" },
   transparent: { app: "rgba(8, 8, 16, 0.72)", terminal: "rgba(6, 6, 12, 0.85)", label: "Transparente" },
 };
+
+const ACCENT_COLORS = [
+  { label: "Azul", value: "#3b82f6" },
+  { label: "Ciano", value: "#06b6d4" },
+  { label: "Verde", value: "#22c55e" },
+  { label: "Roxo", value: "#a855f7" },
+  { label: "Rosa", value: "#ec4899" },
+  { label: "Laranja", value: "#f97316" },
+  { label: "Vermelho", value: "#ef4444" },
+  { label: "Amarelo", value: "#eab308" },
+];
 
 // ─── Terminal Themes (with REAL background colors, not transparent) ──────────
 const TERM_THEMES: Record<string, { background: string; foreground: string; cursor: string; cursorAccent: string; selectionBackground: string;[key: string]: string }> = {
@@ -195,6 +222,16 @@ const TERM_THEMES: Record<string, { background: string; foreground: string; curs
   },
 };
 
+const DEFAULT_CUSTOM_THEME: Record<string, string> = {
+  background: "#0a0a14",
+  foreground: "#dce6ff",
+  cursor: "#3b82f6",
+  cursorAccent: "#0a0a14",
+  selectionBackground: "rgba(59,130,246,0.3)",
+  black: "#0a0a12", red: "#f87171", green: "#4ade80", yellow: "#fbbf24",
+  blue: "#60a5fa", magenta: "#c084fc", cyan: "#22d3ee", white: "#dce6ff",
+};
+
 const EMOJI_FONT = ', "Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", monospace';
 
 const SHELL_OPTIONS: { value: ShellType; label: string; icon: typeof IconShellCmd }[] = [
@@ -249,9 +286,24 @@ function getCommandSuggestion(input: string): string | null {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem("ezzo-terminal-settings");
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Migrate old settings by adding missing fields
+      return {
+        fontFamily: parsed.fontFamily || '"JetBrains Mono", monospace',
+        fontSize: parsed.fontSize ?? 14,
+        background: parsed.background || "dark",
+        theme: parsed.theme || "ezzo",
+        skipUpdateVersion: parsed.skipUpdateVersion || "",
+        autoCheckUpdates: parsed.autoCheckUpdates !== false,
+        opacity: parsed.opacity ?? 1,
+        accentColor: parsed.accentColor || "#3b82f6",
+        terminalPadding: parsed.terminalPadding ?? 0,
+        customThemeColors: parsed.customThemeColors || DEFAULT_CUSTOM_THEME,
+      };
+    }
   } catch { /* ignore */ }
-  return { fontFamily: '"JetBrains Mono", monospace', fontSize: 14, background: "dark", theme: "ezzo" };
+  return { fontFamily: '"JetBrains Mono", monospace', fontSize: 14, background: "dark", theme: "ezzo", skipUpdateVersion: "", autoCheckUpdates: true, opacity: 1, accentColor: "#3b82f6", terminalPadding: 0, customThemeColors: DEFAULT_CUSTOM_THEME };
 }
 
 function saveSettings(s: Settings) { localStorage.setItem("ezzo-terminal-settings", JSON.stringify(s)); }
@@ -269,6 +321,27 @@ function loadSnippets(): Snippet[] {
 }
 
 function saveSnippets(s: Snippet[]) { localStorage.setItem("ezzo-terminal-snippets", JSON.stringify(s)); }
+
+function loadMacros(): Macro[] {
+  try {
+    const raw = localStorage.getItem("ezzo-terminal-macros");
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveMacros(m: Macro[]) { localStorage.setItem("ezzo-terminal-macros", JSON.stringify(m)); }
+
+// ─── Command Usage Stats ─────────────────────────────────────────────────────
+type CommandStats = Record<string, number>;
+
+function loadCommandStats(): CommandStats {
+  try {
+    const raw = localStorage.getItem("ezzo-terminal-command-stats");
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function saveCommandStats(s: CommandStats) { localStorage.setItem("ezzo-terminal-command-stats", JSON.stringify(s)); }
 
 // ─── Tab Persistence ──────────────────────────────────────────────────────────
 // We persist shell + title only (PTY sessions are OS processes; we can't restore them,
@@ -321,9 +394,10 @@ interface PaneProps {
   tab: Tab;
   active: boolean;
   settings: Settings;
+  onCommand?: (command: string) => void;
 }
 
-function TerminalPane({ tab, active, settings }: PaneProps) {
+function TerminalPane({ tab, active, settings, onCommand }: PaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -345,8 +419,9 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
     initializedRef.current = true;
 
     const fullFont = settings.fontFamily.replace(/,\s*monospace\s*$/, "") + EMOJI_FONT;
-    const theme = TERM_THEMES[settings.theme] || TERM_THEMES.ezzo;
-
+    const theme = settings.theme === "custom" && settings.customThemeColors
+      ? settings.customThemeColors
+      : (TERM_THEMES[settings.theme] || TERM_THEMES.ezzo);
     const isLight = settings.background === "light";
     const termTheme = { ...theme };
     if (isLight) {
@@ -534,6 +609,8 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
           // ── Buffer tracking for autocomplete suggestions ──────────────
           // Reset buffer on ENTER (command submitted)
           if (data === "\r" || data === "\n") {
+            const cmd = inputBufferRef.current.trim();
+            if (cmd && onCommand) onCommand(cmd);
             inputBufferRef.current = "";
             suggestionRef.current = "";
             setSuggestion("");
@@ -619,7 +696,9 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
     if (!term) return;
 
     const fullFont = settings.fontFamily.replace(/,\s*monospace\s*$/, "") + EMOJI_FONT;
-    const theme = TERM_THEMES[settings.theme] || TERM_THEMES.ezzo;
+    const theme = settings.theme === "custom" && settings.customThemeColors
+      ? settings.customThemeColors
+      : (TERM_THEMES[settings.theme] || TERM_THEMES.ezzo);
     const isLight = settings.background === "light";
     const termTheme: Record<string, string> = { ...theme };
     if (isLight) {
@@ -684,7 +763,7 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
       <div
         ref={containerRef}
         className="terminal-container"
-        style={{ flex: 1, width: "100%" }}
+        style={{ flex: 1, width: "100%", padding: settings.terminalPadding > 0 ? settings.terminalPadding + "px" : undefined }}
         onMouseDown={() => { if (termRef.current) termRef.current.focus(); }}
       >
         {ptyLoading && (
@@ -739,6 +818,26 @@ function SettingsPanel({ settings, onChange, onClose }: SettingsPanelProps) {
           {THEME_OPTIONS.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
         </select>
       </div>
+      {settings.theme === "custom" && (
+        <div className="settings-section custom-theme-section">
+          <label className="settings-label">Cores Customizadas</label>
+          <div className="custom-theme-grid">
+            {Object.entries(settings.customThemeColors || DEFAULT_CUSTOM_THEME).map(([key, value]) => (
+              <div key={key} className="custom-theme-color-row">
+                <span className="custom-theme-color-label">{key}</span>
+                <input type="color" className="custom-theme-color-input" value={value} onChange={(e) => {
+                  const updated = { ...(settings.customThemeColors || DEFAULT_CUSTOM_THEME), [key]: e.target.value };
+                  onChange({ ...settings, customThemeColors: updated });
+                }} title={key} />
+                <input type="text" className="custom-theme-color-text" value={value} onChange={(e) => {
+                  const updated = { ...(settings.customThemeColors || DEFAULT_CUSTOM_THEME), [key]: e.target.value };
+                  onChange({ ...settings, customThemeColors: updated });
+                }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="settings-section">
         <label className="settings-label">Fundo</label>
         <div className="settings-bg-options">
@@ -749,14 +848,36 @@ function SettingsPanel({ settings, onChange, onClose }: SettingsPanelProps) {
           ))}
         </div>
       </div>
+      <div className="settings-section">
+        <label className="settings-label">Opacidade: {Math.round(settings.opacity * 100)}%</label>
+        <input type="range" className="settings-range" min={40} max={100} step={5} value={Math.round(settings.opacity * 100)} onChange={(e) => onChange({ ...settings, opacity: parseInt(e.target.value) / 100 })} title="Opacidade" aria-label="Opacidade" />
+      </div>
+      <div className="settings-section">
+        <label className="settings-label">Cor de Destaque</label>
+        <div className="settings-accent-grid">
+          {ACCENT_COLORS.map((c) => (
+            <button
+              key={c.value}
+              className={`settings-accent-btn${settings.accentColor === c.value ? " active" : ""}`}
+              style={{ background: c.value }}
+              onClick={() => onChange({ ...settings, accentColor: c.value })}
+              title={c.label}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="settings-section">
+        <label className="settings-label">Padding Terminal: {settings.terminalPadding}px</label>
+        <input type="range" className="settings-range" min={0} max={20} step={1} value={settings.terminalPadding} onChange={(e) => onChange({ ...settings, terminalPadding: parseInt(e.target.value) })} title="Padding" aria-label="Padding" />
+      </div>
     </div>
   );
 }
 
 // ─── Snippets Panel ──────────────────────────────────────────────────────────
-interface SnippetsPanelProps { onRun: (cmd: string) => void; onClose: () => void; snippets: Snippet[]; onAddSnippet: (s: Snippet) => void; }
+interface SnippetsPanelProps { onRun: (cmd: string) => void; onClose: () => void; snippets: Snippet[]; onAddSnippet: (s: Snippet) => void; onSetSnippets?: (s: Snippet[]) => void; }
 
-function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet }: SnippetsPanelProps) {
+function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet, onSetSnippets }: SnippetsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -783,6 +904,34 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet }: SnippetsPanel
       <div className="settings-header">
         <span className="settings-title">Snippets</span>
         <div style={{ display: "flex", gap: 6 }}>
+          <button className="settings-close" onClick={() => {
+            const data = JSON.stringify(snippets, null, 2);
+            const blob = new Blob([data], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = "ezzo-snippets.json"; a.click();
+            URL.revokeObjectURL(url);
+          }} title="Exportar snippets">
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>file_download</span>
+          </button>
+          <button className="settings-close" onClick={() => {
+            const input = document.createElement("input");
+            input.type = "file"; input.accept = ".json";
+            input.onchange = async (e) => {
+              const file = (e.target as HTMLInputElement).files?.[0];
+              if (!file) return;
+              try {
+                const text = await file.text();
+                const imported: Snippet[] = JSON.parse(text);
+                if (Array.isArray(imported) && imported.length > 0) {
+                  onSetSnippets?.(imported.map((s) => ({ ...s, id: s.id || crypto.randomUUID() })));
+                }
+              } catch { alert("Ficheiro invalido"); }
+            };
+            input.click();
+          }} title="Importar snippets">
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>file_upload</span>
+          </button>
           <button className="settings-close" onClick={() => setAdding(!adding)} title={adding ? "Cancelar" : "Adicionar snippet"} style={{ color: adding ? "#3b82f6" : undefined }}>
             <IconPlus />
           </button>
@@ -815,13 +964,170 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet }: SnippetsPanel
   );
 }
 
+// ─── Macros Panel ──────────────────────────────────────────────────────────
+interface MacrosPanelProps {
+  macros: Macro[];
+  isRecording: boolean;
+  recordingCommands: string[];
+  onPlay: (macro: Macro) => void;
+  onDelete: (id: string) => void;
+  onStartRecording: () => void;
+  onStopRecording: () => void;
+  onSaveMacro: (name: string) => void;
+  onClose: () => void;
+}
+
+function MacrosPanel({ macros, isRecording, recordingCommands, onPlay, onDelete, onStartRecording, onStopRecording, onSaveMacro, onClose }: MacrosPanelProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [macroName, setMacroName] = useState("");
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose(); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  const handleSave = () => {
+    if (!macroName.trim()) return;
+    onSaveMacro(macroName);
+    setMacroName("");
+  };
+
+  return (
+    <div ref={panelRef} className="macros-panel">
+      <div className="settings-header">
+        <span className="settings-title">Macros</span>
+        <div style={{ display: "flex", gap: 6 }}>
+          {isRecording && (
+            <button className="settings-close" onClick={onStopRecording} title="Parar gravacao" style={{ color: "#ef4444" }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>stop</span>
+            </button>
+          )}
+          {!isRecording && (
+            <button className="settings-close" onClick={onStartRecording} title="Gravar macro">
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>fiber_manual_record</span>
+            </button>
+          )}
+          <button className="settings-close" onClick={onClose} title="Fechar macros"><IconTabClose /></button>
+        </div>
+      </div>
+      {isRecording && (
+        <div className="macro-recording">
+          <div className="macro-recording-indicator">
+            <span className="macro-recording-dot" />
+            <span className="macro-recording-text">A gravar... ({recordingCommands.length} comandos)</span>
+          </div>
+          <div className="macro-recording-commands">
+            {recordingCommands.map((cmd, i) => (
+              <div key={i} className="macro-recording-cmd">{cmd}</div>
+            ))}
+          </div>
+          {recordingCommands.length > 0 && (
+            <div className="macro-save-row">
+              <input className="snippet-input" placeholder="Nome da macro..." value={macroName} onChange={(e) => setMacroName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }} />
+              <button className="snippet-add-btn" onClick={handleSave}>Guardar Macro</button>
+            </div>
+          )}
+        </div>
+      )}
+      {macros.length === 0 && !isRecording && (
+        <div className="fe-empty">Nenhuma macro guardada</div>
+      )}
+      {macros.map((macro) => (
+        <div key={macro.id} className="macro-card">
+          <div className="macro-card-header">
+            <span className="macro-card-name">{macro.name}</span>
+            <span className="macro-card-count">{macro.commands.length} comandos</span>
+          </div>
+          <div className="macro-card-preview">
+            {macro.commands.slice(0, 3).map((cmd, i) => (
+              <div key={i} className="macro-cmd-preview">{cmd}</div>
+            ))}
+            {macro.commands.length > 3 && <div className="macro-cmd-more">+{macro.commands.length - 3} mais</div>}
+          </div>
+          <div className="macro-card-actions">
+            <button className="macro-play-btn" onClick={() => onPlay(macro)}>
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>play_arrow</span>
+              Executar
+            </button>
+            <button className="macro-delete-btn" onClick={() => onDelete(macro.id)} title="Apagar macro">
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>delete</span>
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Usage Stats Panel ──────────────────────────────────────────────────────
+interface StatsPanelProps { commandStats: CommandStats; onClear: () => void; onClose: () => void; }
+
+function StatsPanel({ commandStats, onClear, onClose }: StatsPanelProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose(); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  const sorted = Object.entries(commandStats)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 30);
+  const total = Object.values(commandStats).reduce((a, b) => a + b, 0);
+
+  return (
+    <div ref={panelRef} className="stats-panel">
+      <div className="settings-header">
+        <span className="settings-title">Estatisticas de Uso</span>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button className="settings-close" onClick={onClear} title="Limpar estatisticas">
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>delete_sweep</span>
+          </button>
+          <button className="settings-close" onClick={onClose} title="Fechar"><IconTabClose /></button>
+        </div>
+      </div>
+      <div className="stats-total-row">
+        <span className="stats-total-text">Total de comandos: {total}</span>
+        <span className="stats-total-text">Comandos unicos: {sorted.length}</span>
+      </div>
+      {sorted.length === 0 && (
+        <div className="fe-empty">Nenhum comando registado ainda</div>
+      )}
+      {sorted.map(([cmd, count], idx) => {
+        const pct = total > 0 ? (count / total) * 100 : 0;
+        return (
+          <div key={cmd} className="stats-row">
+            <span className="stats-rank">{idx + 1}</span>
+            <span className="stats-cmd">{cmd}</span>
+            <div className="stats-bar-track">
+              <div className="stats-bar-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <span className="stats-count">{count}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Command id counter (useRef no App para evitar estado global mutável) ──
 const cmdIdCounterRef = { current: 0 };
 function cmdId(counterRef: { current: number }): string { return `cmd-${++counterRef.current}`; }
 
+// ─── Macro Types ──────────────────────────────────────────────────────
+interface Macro {
+  id: string;
+  name: string;
+  commands: string[];
+  createdAt: number;
+}
+
 // ─── Refs globais (acedidos pelo TerminalPane via atalhos) ─────────────
 const onAddSnippetRef: { current: ((s: Snippet) => void) | null } = { current: null };
 const showSnippetsRef: { current: (() => void) | null } = { current: null };
+const onMacroCommandRef: { current: ((cmd: string) => void) | null } = { current: null };
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -856,6 +1162,22 @@ export default function App() {
   const [showMonitor, setShowMonitor] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showExtensions, setShowExtensions] = useState(false);
+  const [showFileExplorer, setShowFileExplorer] = useState(false);
+  const [showHistorySearch, setShowHistorySearch] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+  const [commandStats, setCommandStats] = useState<CommandStats>(loadCommandStats);
+  // ─── Macros ────────────────────────────────────────────────────────
+  const [macros, setMacros] = useState<Macro[]>(loadMacros);
+  const [showMacros, setShowMacros] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingCommands, setRecordingCommands] = useState<string[]>([]);
+  const macroPlaybackRef = useRef<{ timeoutId: number | null; abort: boolean }>({ timeoutId: null, abort: false });
+  const [commandHistory, setCommandHistory] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem("ezzo-terminal-history");
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem("ezzo-welcome-dismissed"));
   const [snippets, setSnippets] = useState<Snippet[]>(loadSnippets);
   const [splitMode, setSplitMode] = useState<"none" | "horizontal" | "vertical">("none");
@@ -877,6 +1199,19 @@ export default function App() {
   focusedTabIdRef.current = focusedTabId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+
+  // ─── Update Check ─────────────────────────────────────────────────────────
+  const { status: updateStatus, downloadUpdate } = useUpdateCheck();
+  const autoUpdateRef = useRef(settings.autoCheckUpdates);
+  autoUpdateRef.current = settings.autoCheckUpdates;
+  const skipVersionRef = useRef(settings.skipUpdateVersion);
+  skipVersionRef.current = settings.skipUpdateVersion;
+
+  useEffect(() => {
+    if (updateStatus.state === "available" && autoUpdateRef.current && updateStatus.version !== skipVersionRef.current) {
+      downloadUpdate();
+    }
+  }, [updateStatus.state, downloadUpdate]);
 
   const bgTheme = BG_THEMES[settings.background];
 
@@ -981,6 +1316,78 @@ export default function App() {
     });
   }, []);
 
+  const setSnippetsAndSave = useCallback((s: Snippet[]) => {
+    setSnippets(s);
+    saveSnippets(s);
+  }, []);
+
+  // ─── Macro Functions ──────────────────────────────────────────────
+  const startRecording = useCallback(() => {
+    setIsRecording(true);
+    setRecordingCommands([]);
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    setIsRecording(false);
+  }, []);
+
+  const saveMacro = useCallback((name: string) => {
+    if (!name.trim() || recordingCommands.length === 0) return;
+    const newMacro: Macro = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      commands: [...recordingCommands],
+      createdAt: Date.now(),
+    };
+    setMacros((prev) => {
+      const next = [...prev, newMacro];
+      saveMacros(next);
+      return next;
+    });
+    setRecordingCommands([]);
+    setIsRecording(false);
+  }, [recordingCommands]);
+
+  const deleteMacro = useCallback((id: string) => {
+    setMacros((prev) => {
+      const next = prev.filter((m) => m.id !== id);
+      saveMacros(next);
+      return next;
+    });
+  }, []);
+
+  const playMacro = useCallback((macro: Macro) => {
+    if (macro.commands.length === 0) return;
+    macroPlaybackRef.current.abort = false;
+    let idx = 0;
+    const playNext = () => {
+      if (macroPlaybackRef.current.abort || idx >= macro.commands.length) return;
+      const targetId = focusedTabIdRef.current || activeIdRef.current;
+      const entry = getPtyEntry(targetId);
+      if (entry) {
+        entry.write(macro.commands[idx] + "\r");
+      }
+      idx++;
+      macroPlaybackRef.current.timeoutId = window.setTimeout(playNext, 400);
+    };
+    playNext();
+  }, []);
+
+  const clearStats = useCallback(() => {
+    setCommandStats({});
+    saveCommandStats({});
+  }, []);
+
+  // Expor ref para recording (acedido pelo TerminalPane via onCommand)
+  useEffect(() => {
+    onMacroCommandRef.current = (cmd: string) => {
+      if (isRecording) {
+        setRecordingCommands((prev) => [...prev, cmd]);
+      }
+    };
+    return () => { onMacroCommandRef.current = null; };
+  }, [isRecording]);
+
   const installExtensionCommands = useCallback((commands: { name: string; command: string; category: string }[]) => {
     setSnippets((prev) => {
       const existingNames = new Set(prev.map((s) => s.name));
@@ -993,6 +1400,75 @@ export default function App() {
       return next;
     });
   }, []);
+
+  // ─── Command History ─────────────────────────────────────────────────
+  const MAX_HISTORY = 500;
+  const addToHistory = useCallback((cmd: string) => {
+    setCommandHistory((prev) => {
+      const filtered = prev.filter((c) => c !== cmd);
+      const next = [cmd, ...filtered].slice(0, MAX_HISTORY);
+      try { localStorage.setItem("ezzo-terminal-history", JSON.stringify(next)); } catch {}
+      return next;
+    });
+    // Record command usage stats
+    const baseCmd = cmd.split(/\s+/)[0].toLowerCase();
+    if (baseCmd) {
+      setCommandStats((prev) => {
+        const next = { ...prev, [baseCmd]: (prev[baseCmd] || 0) + 1 };
+        saveCommandStats(next);
+        return next;
+      });
+    }
+    // Also record for macros if recording
+    onMacroCommandRef.current?.(cmd);
+  }, []);
+
+  const handleHistorySelect = useCallback((cmd: string) => {
+    const targetId = focusedTabId || activeId;
+    const entry = getPtyEntry(targetId);
+    if (entry) {
+      entry.write(cmd + "\r");
+      entry.focus();
+    }
+  }, [focusedTabId, activeId]);
+
+  // ─── Directory change (from FileExplorer) ─────────────────────────────
+  const handleDirChange = useCallback((dir: string) => {
+    setCurrentDirectory(dir);
+  }, []);
+
+  const handleOpenInExplorer = useCallback((path: string) => {
+    invoke("open_in_explorer", { path }).catch(() => {});
+  }, []);
+
+  // ─── Quake Mode ──────────────────────────────────────────────────────
+  const [isQuakeMode, setIsQuakeMode] = useState(false);
+  const quakePosRef = useRef({ x: 0, y: 0, width: 1100, height: 720 });
+
+  const toggleQuakeMode = useCallback(async () => {
+    const win = getCurrentWebviewWindow();
+    if (isQuakeMode) {
+      await win.setSize(new LogicalSize(quakePosRef.current.width, quakePosRef.current.height));
+      await win.setPosition(new LogicalPosition(quakePosRef.current.x, quakePosRef.current.y));
+      await win.setAlwaysOnTop(false);
+      if (quakePosRef.current.height < 600) await win.maximize();
+      setIsQuakeMode(false);
+    } else {
+      const currentSize = await win.outerSize();
+      const currentPos = await win.outerPosition();
+      quakePosRef.current = { x: currentPos.x, y: currentPos.y, width: currentSize.width, height: currentSize.height };
+      const monitors = await availableMonitors();
+      const monitor = monitors?.[0] || await primaryMonitor();
+      if (monitor) {
+        const s = monitor.size;
+        const scale = monitor.scaleFactor || 1;
+        await win.setSize(new LogicalSize(Math.round(s.width / scale), Math.round(s.height * 0.45 / scale)));
+        await win.setPosition(new LogicalPosition(0, 0));
+        await win.setAlwaysOnTop(true);
+      }
+      setIsQuakeMode(true);
+    }
+  }, [isQuakeMode]);
 
   // Ligar refs globais para atalhos no TerminalPane (Ctrl+Shift+K)
   useEffect(() => {
@@ -1073,6 +1549,9 @@ export default function App() {
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Snippets", shortcut: "Ctrl+Shift+S", icon: "snippet", action: () => { setShowSnippets((v) => !v); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Extensões", icon: "extension", action: () => { setShowExtensions((v) => !v); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Abrir Pasta no Explorador", icon: "folder_open", action: () => { invoke("open_in_explorer", { path: currentDirectory || "C:\\" }).catch(() => {}); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Explorador de Ficheiros", icon: "folder", action: () => { setShowFileExplorer((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Historico de Comandos", shortcut: "Ctrl+R", icon: "history", action: () => { setShowHistorySearch(true); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Modo Quake", shortcut: "Ctrl+`", icon: "contract", action: () => toggleQuakeMode() },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Monitor do Sistema", icon: "monitor", action: () => { setShowMonitor((v) => !v); } },
     { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Abrir Monitor em Janela Separada", icon: "monitor", action: () => { invoke("open_monitor_window"); } },
     { id: cmdId(cmdIdCounterRef), category: "Painéis", label: "Split Vertical", shortcut: "Ctrl+Shift+D", icon: "split", action: () => toggleSplit("vertical") },
@@ -1084,7 +1563,7 @@ export default function App() {
     { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Minimizar", icon: "window", action: () => invoke("minimize").catch(() => { }) },
     { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Maximizar", icon: "window", action: () => invoke("maximize").catch(() => { }) },
     { id: cmdId(cmdIdCounterRef), category: "Ajuda", label: "Atalhos de Teclado", icon: "help", action: () => { setShowCommandPalette(true); } },
-  ], [toggleSplit, addTab, activeId, tabs, closeTab, currentDirectory]);
+  ], [toggleSplit, addTab, activeId, tabs, closeTab, currentDirectory, toggleQuakeMode]);
 
   // Keyboard shortcuts at app level
   useEffect(() => {
@@ -1096,16 +1575,18 @@ export default function App() {
       if (ctrl && e.shiftKey && e.key === "N") { e.preventDefault(); addTab(); }
       if (ctrl && e.shiftKey && e.key === "P") { e.preventDefault(); setShowCommandPalette(true); }
       if (ctrl && e.key === ",") { e.preventDefault(); setShowSettings((v) => !v); }
+      if (ctrl && e.key === "r" && !e.shiftKey) { e.preventDefault(); setShowHistorySearch(true); }
+      if (ctrl && e.key === "`") { e.preventDefault(); toggleQuakeMode(); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [addTab, toggleSplit]);
+  }, [addTab, toggleSplit, toggleQuakeMode]);
 
   const activeTab = tabs.find((t) => t.id === activeId);
   const secondTab = secondTabId ? tabs.find((t) => t.id === secondTabId) : undefined;
 
   return (
-    <div className={`terminal-app${settings.background === "light" ? " theme-light" : ""}${settings.background === "transparent" ? " theme-transparent" : ""}`} style={{ background: bgTheme.app }}>
+    <div className={`terminal-app${settings.background === "light" ? " theme-light" : ""}${settings.background === "transparent" ? " theme-transparent" : ""}`} style={{ background: bgTheme.app, opacity: settings.opacity, ["--accent-blue" as string]: settings.accentColor }}>
       {dragOver && (
         <div className="drag-overlay">
           <div className="drag-overlay-text">Soltar ficheiro aqui</div>
@@ -1125,6 +1606,10 @@ export default function App() {
           <button className="title-bar-btn" onClick={() => setShowSnippets(!showSnippets)} title="Snippets (Ctrl+Shift+S)" style={showSnippets ? { color: "#3b82f6" } : undefined}><IconSnippet /></button>
           <div className="title-bar-separator" />
           <button className="title-bar-btn" onClick={() => invoke("open_in_explorer", { path: currentDirectory || "C:\\" }).catch(() => {})} title="Abrir pasta no Explorador" style={{ color: "#f59e0b" }}><IconFolder /></button>
+          <button className="title-bar-btn" onClick={() => setShowFileExplorer(!showFileExplorer)} title="Explorador de Ficheiros" style={showFileExplorer ? { color: "#22c55e" } : undefined}><IconFileTree /></button>
+          <button className="title-bar-btn" onClick={() => setShowStats(!showStats)} title="Estatisticas de uso" style={showStats ? { color: "#22c55e" } : undefined}><IconStats /></button>
+          <button className="title-bar-btn" onClick={toggleQuakeMode} title="Modo Quake (Ctrl+`)" style={isQuakeMode ? { color: "#f97316" } : undefined}><IconQuake /></button>
+          <button className="title-bar-btn" onClick={() => setShowMacros(!showMacros)} title="Macros" style={showMacros ? { color: "#f97316" } : undefined}><IconMacro /></button>
           <button className="title-bar-btn" onClick={() => setShowExtensions(!showExtensions)} title="Extensoes" style={showExtensions ? { color: "#a855f7" } : undefined}><IconExtensions /></button>
           <button className="title-bar-btn" onClick={() => setShowMonitor(!showMonitor)} title="Monitor do Sistema" style={showMonitor ? { color: "#22c55e" } : undefined}><IconMonitor /></button>
           <button className="title-bar-btn" onClick={() => setShowSettings(!showSettings)} title="Definicoes (Ctrl+,)"><IconGear /></button>
@@ -1230,7 +1715,7 @@ export default function App() {
           <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
             {tabs.filter((tab) => splitMode === "none" || tab.id !== secondTabId).map((tab) => (
               <div key={tab.id} style={{ position: "absolute", inset: 0, zIndex: tab.id === activeId ? 1 : -1, opacity: tab.id === activeId ? 1 : 0, pointerEvents: tab.id === activeId ? "auto" : "none" }}>
-                <TerminalPane tab={tab} active={tab.id === activeId} settings={settings} />
+                <TerminalPane tab={tab} active={tab.id === activeId} settings={settings} onCommand={addToHistory} />
               </div>
             ))}
           </div>
@@ -1266,7 +1751,7 @@ export default function App() {
                 </select>
               </div>
               <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-                <TerminalPane tab={secondTab} active={true} settings={settings} />
+                <TerminalPane tab={secondTab} active={true} settings={settings} onCommand={addToHistory} />
               </div>
             </div>
           </>
@@ -1279,16 +1764,51 @@ export default function App() {
             <ExtensionsPanel onInstallCommands={installExtensionCommands} onClose={() => setShowExtensions(false)} />
           </Suspense>
         )}
+        {showFileExplorer && (
+          <Suspense fallback={null}>
+            <FileExplorer
+              initialPath={currentDirectory || "C:\\"}
+              onNavigate={handleDirChange}
+              onClose={() => setShowFileExplorer(false)}
+              onOpenInExplorer={handleOpenInExplorer}
+            />
+          </Suspense>
+        )}
+        {showHistorySearch && (
+          <Suspense fallback={null}>
+            <HistorySearch
+              history={commandHistory}
+              onSelect={handleHistorySelect}
+              onClose={() => setShowHistorySearch(false)}
+            />
+          </Suspense>
+        )}
         {showWelcome && (
           <Suspense fallback={null}>
             <WelcomeScreen onDismiss={() => { localStorage.setItem("ezzo-welcome-dismissed", "1"); setShowWelcome(false); }} />
           </Suspense>
         )}
-        {showSnippets && <SnippetsPanel onRun={runSnippet} onClose={() => setShowSnippets(false)} snippets={snippets} onAddSnippet={addSnippet} />}
+        {showSnippets && <SnippetsPanel onRun={runSnippet} onClose={() => setShowSnippets(false)} snippets={snippets} onAddSnippet={addSnippet} onSetSnippets={setSnippetsAndSave} />}
+        {showMacros && (
+          <MacrosPanel
+            macros={macros}
+            isRecording={isRecording}
+            recordingCommands={recordingCommands}
+            onPlay={playMacro}
+            onDelete={deleteMacro}
+            onStartRecording={startRecording}
+            onStopRecording={stopRecording}
+            onSaveMacro={saveMacro}
+            onClose={() => setShowMacros(false)}
+          />
+        )}
         {showMonitor && (
           <Suspense fallback={null}>
             <SystemMonitor onClose={() => setShowMonitor(false)} />
           </Suspense>
+        )}
+        {showStats && (
+          <StatsPanel commandStats={commandStats} onClear={clearStats} onClose={() => setShowStats(false)} />
         )}
         {showCommandPalette && (
           <Suspense fallback={null}>
@@ -1316,6 +1836,10 @@ export default function App() {
               {SHELL_OPTIONS.find((s) => s.value === (tabs.find(t => t.id === focusedTabId)?.shell || activeTab?.shell || "cmd"))?.label || "CMD"}
             </span>
           )}
+          <span className="status-item status-path" title="Clique para alterar o diretorio">
+            <span className="material-symbols-outlined" style={{ fontSize: 11, opacity: 0.5 }}>folder</span>
+            {currentDirectory || "C:\\"}
+          </span>
           <span className="status-item" style={{ opacity: 0.5 }}>
             {FONT_OPTIONS.find((f) => f.value === settings.fontFamily)?.label} {settings.fontSize}px
           </span>
@@ -1325,6 +1849,10 @@ export default function App() {
         </div>
         <div className="status-right">
           {splitMode !== "none" && <span className="status-item status-split-badge">Split {splitMode === "vertical" ? "Vertical" : "Horizontal"}</span>}
+          <span className="status-item status-history-btn" onClick={() => setShowHistorySearch(true)} title="Historico de comandos (Ctrl+R)">
+            <span className="material-symbols-outlined" style={{ fontSize: 12 }}>history</span>
+            {commandHistory.length}
+          </span>
           <span className="status-item">{tabs.length} {tabs.length === 1 ? "aba" : "abas"}</span>
           <span className="status-item">{clock}</span>
         </div>
