@@ -53,5 +53,16 @@
       },
       "wix": null
     }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://raw.githubusercontent.com/ezzolink/terminal/main/update.json"
+      ],
+      "dialog": false,
+      "pubkey": ""
+    }
   }
+}
 }

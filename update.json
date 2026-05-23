@@ -1,0 +1,11 @@
+{
+  "version": "1.5.0",
+  "notes": "EZZO Terminal v1.5.0 - Lancamento inicial",
+  "pub_date": "2026-05-23T20:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "",
+      "url": "https://github.com/ezzolink/terminal/releases/download/v1.5.0/EZZO.Terminal_1.5.0_x64-setup.exe"
+    }
+  }
+}

@@ -1,277 +1,162 @@
-import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useCallback } from "react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 interface UpdateStatus {
-    state: "idle" | "checking" | "updating" | "downloading" | "ready" | "error";
+    state: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error";
     version?: string;
     progress?: number;
     error?: string;
 }
 
-export default function UpdateSection() {
+const UPDATE_EVENT = "ezzo-update-progress";
+
+export function useUpdateCheck() {
     const [status, setStatus] = useState<UpdateStatus>({ state: "idle" });
 
-    const checkForUpdates = async () => {
+    useEffect(() => {
+        const timer = setTimeout(() => checkForUpdates(), 3000);
+        return () => clearTimeout(timer);
+    }, []);
+
+    useEffect(() => {
+        const handler = (e: CustomEvent) => {
+            const pct = e.detail?.progress;
+            if (typeof pct === "number") {
+                setStatus(prev => ({ ...prev, state: "downloading", progress: pct }));
+            }
+        };
+        window.addEventListener(UPDATE_EVENT, handler as EventListener);
+        return () => window.removeEventListener(UPDATE_EVENT, handler as EventListener);
+    }, []);
+
+    const checkForUpdates = useCallback(async () => {
+        if (status.state === "checking" || status.state === "downloading") return;
         setStatus({ state: "checking" });
         try {
-            const result = await invoke<{ latest: string; current: string; updateNeeded: boolean }>("check_for_updates");
-            if (result.updateNeeded) {
-                setStatus({ state: "ready", version: result.latest });
+            const update = await check();
+            if (update?.available) {
+                setStatus({ state: "available", version: update.version });
             } else {
-                setStatus({ state: "idle", version: result.current });
-                // Reset after 2s
-                setTimeout(() => setStatus({ state: "idle" }), 2000);
-            }
-        } catch (e: any) {
-            setStatus({ state: "error", error: String(e) });
-            setTimeout(() => setStatus({ state: "idle" }), 3000);
-        }
-    };
-
-    const downloadUpdate = async () => {
-        setStatus((prev) => ({ ...prev, state: "downloading", progress: 0 }));
-        try {
-            // Simulate download progress
-            for (let i = 10; i <= 100; i += 15) {
-                await new Promise((r) => setTimeout(r, 400));
-                setStatus((prev) => ({ ...prev, progress: i }));
-            }
-            setStatus({ state: "downloading", progress: 100 });
-            // In production, this would trigger the installer
-            setTimeout(() => {
                 setStatus({ state: "idle" });
-            }, 2000);
+            }
         } catch (e: any) {
             setStatus({ state: "error", error: String(e) });
+            setTimeout(() => setStatus({ state: "idle" }), 4000);
         }
-    };
+    }, [status.state]);
 
+    const downloadUpdate = useCallback(async () => {
+        try {
+            const update = await check();
+            if (!update?.available) { setStatus({ state: "idle" }); return; }
+            setStatus({ state: "downloading", progress: 0, version: update.version });
+
+            let totalBytes = 0;
+            let downloadedBytes = 0;
+
+            await update.downloadAndInstall((event) => {
+                switch (event.event) {
+                    case "Started":
+                        totalBytes = event.data.contentLength || 0;
+                        downloadedBytes = 0;
+                        setStatus(prev => ({ ...prev, progress: 0 }));
+                        break;
+                    case "Progress":
+                        downloadedBytes += event.data.chunkLength;
+                        const pct = totalBytes > 0
+                            ? Math.round((downloadedBytes / totalBytes) * 100)
+                            : Math.min((status.progress || 0) + 5, 90);
+                        setStatus(prev => ({ ...prev, progress: Math.min(pct, 99) }));
+                        window.dispatchEvent(new CustomEvent(UPDATE_EVENT, { detail: { progress: Math.min(pct, 99) } }));
+                        break;
+                    case "Finished":
+                        setStatus(prev => ({ ...prev, state: "downloaded", progress: 100 }));
+                        window.dispatchEvent(new CustomEvent(UPDATE_EVENT, { detail: { progress: 100, finished: true } }));
+                        break;
+                }
+            });
+            setStatus({ state: "downloaded", version: update.version });
+        } catch (e: any) {
+            setStatus({ state: "error", error: String(e) });
+            setTimeout(() => setStatus({ state: "idle" }), 4000);
+        }
+    }, []);
+
+    const installAndRestart = useCallback(async () => {
+        try { await relaunch(); }
+        catch (e: any) { setStatus({ state: "error", error: String(e) }); }
+    }, []);
+
+    return { status, checkForUpdates, downloadUpdate, installAndRestart };
+}
+
+export default function UpdateSection() {
+    const { status, checkForUpdates, downloadUpdate, installAndRestart } = useUpdateCheck();
     return (
         <div className="settings-section">
-            <label className="settings-label">Versão</label>
+            <label className="settings-label">Versao</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {/* Version info */}
-                <div
-                    style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "8px 12px",
-                        background: "rgba(255,255,255,0.03)",
-                        borderRadius: 6,
-                        border: "1px solid rgba(255,255,255,0.06)",
-                    }}
-                >
+                <div className="update-version-row">
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span
-                            className="material-symbols-outlined"
-                            style={{ fontSize: 16, color: "rgba(59,130,246,0.7)" }}
-                        >
-                            info
-                        </span>
-                        <span
-                            style={{
-                                fontFamily: "'JetBrains Mono', monospace",
-                                fontSize: 11,
-                                color: "rgba(200,210,240,0.7)",
-                            }}
-                        >
-                            EZZO Terminal v1.5.0
-                        </span>
+                        <span className="material-symbols-outlined" style={{ fontSize: 16, color: "rgba(59,130,246,0.7)" }}>info</span>
+                        <span className="update-version-text">EZZO Terminal v1.5.0</span>
                     </div>
-                    {status.state === "idle" && !status.version && (
-                        <span
-                            style={{
-                                fontFamily: "'JetBrains Mono', monospace",
-                                fontSize: 9,
-                                color: "#22c55e",
-                                padding: "2px 8px",
-                                background: "rgba(34,197,94,0.1)",
-                                borderRadius: 4,
-                                border: "1px solid rgba(34,197,94,0.2)",
-                            }}
-                        >
-                            ATUALIZADO
-                        </span>
-                    )}
-                    {status.state === "idle" && status.version && (
-                        <span
-                            style={{
-                                fontFamily: "'JetBrains Mono', monospace",
-                                fontSize: 9,
-                                color: "#22c55e",
-                                padding: "2px 8px",
-                                background: "rgba(34,197,94,0.1)",
-                                borderRadius: 4,
-                                border: "1px solid rgba(34,197,94,0.2)",
-                            }}
-                        >
-                            ATUALIZADO
-                        </span>
-                    )}
+                    {status.state === "idle" && <span className="update-badge update-badge-ok">ATUALIZADO</span>}
+                    {status.state === "downloaded" && <span className="update-badge update-badge-ready">PRONTO</span>}
                 </div>
-
-                {/* Check button */}
                 {status.state === "idle" && (
-                    <button
-                        onClick={checkForUpdates}
-                        className="snippet-add-btn"
-                        style={{ fontSize: 11, width: "100%" }}
-                    >
-                        Verificar Atualizações
+                    <button onClick={checkForUpdates} className="snippet-add-btn" style={{ fontSize: 11, width: "100%" }}>
+                        Verificar Actualizacoes
                     </button>
                 )}
-
-                {/* Checking state */}
                 {status.state === "checking" && (
-                    <div
-                        style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            padding: "8px 12px",
-                            background: "rgba(59,130,246,0.06)",
-                            borderRadius: 6,
-                        }}
-                    >
-                        <div
-                            style={{
-                                width: 12,
-                                height: 12,
-                                borderRadius: "50%",
-                                border: "2px solid rgba(59,130,246,0.2)",
-                                borderTopColor: "#3b82f6",
-                                animation: "spin 0.6s linear infinite",
-                            }}
-                        />
-                        <span style={{ fontSize: 11, color: "rgba(148,163,184,0.6)" }}>
-                            A verificar actualizações...
-                        </span>
+                    <div className="update-state-box" style={{ background: "rgba(59,130,246,0.06)" }}>
+                        <div className="update-spinner" />
+                        <span style={{ fontSize: 11, color: "rgba(148,163,184,0.6)" }}>A verificar...</span>
                     </div>
                 )}
-
-                {/* Update available */}
-                {status.state === "ready" && (
-                    <div
-                        style={{
-                            padding: "10px 12px",
-                            background: "rgba(34,197,94,0.06)",
-                            borderRadius: 6,
-                            border: "1px solid rgba(34,197,94,0.15)",
-                        }}
-                    >
-                        <div
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 6,
-                                marginBottom: 8,
-                            }}
-                        >
-                            <span
-                                className="material-symbols-outlined"
-                                style={{ fontSize: 14, color: "#22c55e" }}
-                            >
-                                new_releases
-                            </span>
-                            <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>
-                                Nova versão disponível: v{status.version}
-                            </span>
+                {status.state === "available" && (
+                    <div className="update-available-box">
+                        <div className="update-available-header">
+                            <span className="material-symbols-outlined" style={{ fontSize: 14, color: "#22c55e" }}>new_releases</span>
+                            <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>Nova versao: v{status.version}</span>
                         </div>
-                        <button
-                            className="snippet-add-btn"
-                            onClick={downloadUpdate}
-                            style={{ fontSize: 10, width: "100%" }}
-                        >
+                        <button onClick={downloadUpdate} className="snippet-add-btn" style={{ fontSize: 10, width: "100%" }}>
                             Baixar e Instalar
                         </button>
                     </div>
                 )}
-
-                {/* Downloading */}
                 {status.state === "downloading" && (
-                    <div
-                        style={{
-                            padding: "10px 12px",
-                            background: "rgba(59,130,246,0.06)",
-                            borderRadius: 6,
-                        }}
-                    >
-                        <div
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "space-between",
-                                marginBottom: 6,
-                            }}
-                        >
-                            <span style={{ fontSize: 10, color: "#3b82f6", fontWeight: 500 }}>
-                                A transferir actualização...
-                            </span>
-                            <span
-                                style={{
-                                    fontFamily: "'JetBrains Mono', monospace",
-                                    fontSize: 9,
-                                    color: "rgba(148,163,184,0.5)",
-                                }}
-                            >
-                                {status.progress || 0}%
-                            </span>
+                    <div className="update-download-box">
+                        <div className="update-download-header">
+                            <span style={{ fontSize: 10, color: "#3b82f6", fontWeight: 500 }}>A transferir...</span>
+                            <span className="update-percent">{status.progress || 0}%</span>
                         </div>
-                        <div
-                            style={{
-                                height: 4,
-                                background: "rgba(255,255,255,0.06)",
-                                borderRadius: 2,
-                                overflow: "hidden",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    height: "100%",
-                                    width: `${status.progress || 0}%`,
-                                    background: "linear-gradient(90deg, #3b82f6, #2563eb)",
-                                    borderRadius: 2,
-                                    transition: "width 0.3s ease",
-                                }}
-                            />
+                        <div className="update-progress-bar">
+                            <div className="update-progress-fill" style={{ width: `${status.progress || 0}%` }} />
                         </div>
-                        {status.progress === 100 && (
-                            <p
-                                style={{
-                                    fontSize: 10,
-                                    color: "#22c55e",
-                                    marginTop: 8,
-                                    textAlign: "center",
-                                }}
-                            >
-                                Transferência concluída! A instalar...
-                            </p>
-                        )}
                     </div>
                 )}
-
-                {/* Error */}
+                {status.state === "downloaded" && (
+                    <div className="update-ready-box">
+                        <div className="update-ready-header">
+                            <span className="material-symbols-outlined" style={{ fontSize: 14, color: "#22c55e" }}>download_done</span>
+                            <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>Pronto! v{status.version}</span>
+                        </div>
+                        <p style={{ fontSize: 10, color: "rgba(148,163,184,0.6)", margin: "6px 0", textAlign: "center" }}>
+                            Sessao sera restaurada apos reiniciar.
+                        </p>
+                        <button onClick={installAndRestart} className="update-install-btn">
+                            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>restart_alt</span>
+                            Instalar e Reiniciar
+                        </button>
+                    </div>
+                )}
                 {status.state === "error" && (
-                    <div
-                        style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 6,
-                            padding: "8px 12px",
-                            background: "rgba(239,68,68,0.08)",
-                            borderRadius: 6,
-                        }}
-                    >
-                        <span
-                            className="material-symbols-outlined"
-                            style={{ fontSize: 14, color: "#ef4444" }}
-                        >
-                            error
-                        </span>
-                        <span style={{ fontSize: 10, color: "rgba(248,113,113,0.7)" }}>
-                            {status.error || "Erro ao verificar actualização"}
-                        </span>
+                    <div className="update-error-box">
+                        <span className="material-symbols-outlined" style={{ fontSize: 14, color: "#ef4444" }}>error</span>
+                        <span style={{ fontSize: 10, color: "rgba(248,113,113,0.7)" }}>{status.error || "Erro"}</span>
                     </div>
                 )}
             </div>
