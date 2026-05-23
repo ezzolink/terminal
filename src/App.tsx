@@ -556,7 +556,7 @@ function TerminalPane({ tab, active, settings, onCommand }: PaneProps) {
     termRef.current = term;
 
     term.writeln(`\x1b[38;2;59;130;246m+-----------------------------------------------------+\x1b[0m`);
-    term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[1;38;2;96;165;250mEZZO Terminal\x1b[0m  \x1b[38;2;100;116;139mv1.5.1\x1b[0m`);
+    term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[1;38;2;96;165;250mEZZO Terminal\x1b[0m  \x1b[38;2;100;116;139mv1.6.2\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  Shell: \x1b[38;2;34;211;238m${tab.shell === "powershell" ? "PowerShell" : tab.shell === "wsl" ? "WSL" : "CMD"}\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m|\x1b[0m  \x1b[38;2;100;116;139mCtrl+C/V/A/L/F | Split | Snippets | Search\x1b[0m`);
     term.writeln(`\x1b[38;2;59;130;246m+-----------------------------------------------------+\x1b[0m`);
