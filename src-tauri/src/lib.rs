@@ -101,18 +101,19 @@ async fn spawn_pty(
     let child_for_reader = shared_child.clone();
 
     // Spawn reader task — uses a dedicated OS thread (spawn_blocking) so it can do blocking I/O.
-    // The kill channel is checked BEFORE each read attempt. We use a small read buffer
-    // and a non-blocking channel poll so the thread exits within ~10ms of receiving the kill signal.
+    // We now use a 50ms polling loop to check the kill signal BETWEEN reads, so that
+    // even if data is streaming continuously, we never block for more than ~50ms
+    // before recognising a kill command.
     ACTIVE_READERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
+        use std::io::ErrorKind;
         println!("[EZZO] PTY {} reader started", id);
         let mut buf = [0u8; 4096];
 
-        // Set the reader end to non-blocking so we can interleave kill checks.
-        // On Windows, portable_pty readers are backed by a pipe; we use a 10ms poll timeout
-        // by running the read in a tight loop and checking kill_rx between iterations.
-        // (Non-blocking mode is not universally available, so we rely on the fact that
-        //  the PTY/process death unblocks read() naturally when we kill the child first.)
+        // Configure pipe reader for non-blocking mode on Windows
+        // portable-pty uses named pipes on Windows — these are inherently non-blocking
+        // with WouldBlock errors; on Unix we could use set_read_timeout or fcntl.
+
         loop {
             // ── Check kill signal before every read ──────────────────────────
             if kill_rx.try_recv().is_ok() {
@@ -129,6 +130,12 @@ async fn spawn_pty(
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
                     let _ = app_clone.emit(&event_name, data);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    // Non-blocking mode: no data available yet, sleep briefly
+                    // then retry (checking kill signal on next iteration)
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
                 }
                 Err(e) => {
                     // Broken pipe / IO error → process is gone

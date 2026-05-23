@@ -1,15 +1,19 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "xterm/css/xterm.css";
-import SystemMonitor from "./SystemMonitor";
-import CommandPalette from "./CommandPalette";
 import ezzoLogo from "./assets/logo-azul.png";
+
+// ─── Lazy-loaded components (reduz bundle inicial) ─────────────────────────
+const SystemMonitor = lazy(() => import("./SystemMonitor"));
+const CommandPalette = lazy(() => import("./CommandPalette"));
+const WelcomeScreen = lazy(() => import("./WelcomeScreen"));
 
 // ─── SVG Icons ───────────────────────────────────────────────────────────────
 // ─── Material Icons (Google Material Symbols) ────────────────────────────────
@@ -330,6 +334,7 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
   const [suggestion, setSuggestion] = useState("");
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchText, setSearchText] = useState("");
+  const [ptyLoading, setPtyLoading] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -353,10 +358,32 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
       fontFamily: fullFont,
       allowTransparency: false,
       scrollback: 10000,
-      convertEol: true,
+      convertEol: false,  // Processamos \r manualmente no output listener para preservar progress bars e TUI
       drawBoldTextInBrightColors: true,
       theme: termTheme as any,
     });
+
+    // ─── Hyperlinks clickáveis (URLs no output) ────────────────────────
+    // xterm.js v5 suporta registerLinkMatcher em runtime (types ausentes, usamos cast)
+    try {
+      (term as any).registerLinkMatcher(
+        /(https?:\/\/[^\s"<>'´`‖｜\[\]]+)/,
+        (_event: MouseEvent, url: string) => {
+          invoke("plugin:opener|open_url", { url }).catch(() => {
+            window.open(url, "_blank", "noopener");
+          });
+        },
+        {
+          tooltipCallback: (_event: MouseEvent, url: string) => {
+            termRef.current?.element?.setAttribute("title", `Abrir: ${url}`);
+          },
+          leaveCallback: () => {
+            termRef.current?.element?.removeAttribute("title");
+          },
+          priority: 1,
+        }
+      );
+    } catch (_) { /* fallback silencioso */ }
 
     const fitAddon = new FitAddon();
     const searchAddon = new SearchAddon();
@@ -364,6 +391,14 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
     term.loadAddon(searchAddon);
     fitRef.current = fitAddon;
     searchRef.current = searchAddon;
+
+    // ─── WebGL Renderer (com fallback Canvas) ─────────────────────────
+    try {
+      const webglAddon = new WebglAddon();
+      term.loadAddon(webglAddon);
+    } catch {
+      // Fallback para renderer Canvas (nativo do xterm) — silencioso
+    }
 
     // ─── Single key handler for ALL shortcuts (Ctrl+C/V/A/L/F + Tab) ───
     term.attachCustomKeyEventHandler((event) => {
@@ -401,6 +436,17 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
       if (ctrl && event.key === "l") { term.clear(); return true; }
       // Ctrl+F: toggle search bar
       if (ctrl && event.key === "f") { setSearchVisible((v) => !v); return false; }
+      // Ctrl+Shift+K: criar snippet a partir da seleção
+      if (ctrl && event.shiftKey && event.key === "K") {
+        const sel = term.getSelection();
+        if (sel) {
+          const name = sel.split(/\s+/).slice(0, 3).join(" ").substring(0, 40);
+          const snippet: Snippet = { id: crypto.randomUUID(), name, command: sel, category: "Rápidos" };
+          onAddSnippetRef.current?.(snippet);
+          showSnippetsRef.current?.();
+        }
+        return false;
+      }
       // Tab: accept command suggestion
       if (event.key === "Tab" && !ctrl && !event.altKey && !event.metaKey) {
         if (suggestionRef.current && inputBufferRef.current) {
@@ -462,11 +508,18 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
           rows: dims?.rows ?? 24,
         });
         ptyIdRef.current = id;
+        setPtyLoading(false);
 
         // ① Register the Tauri output listener FIRST — before onData — so we
         //    never miss the initial shell prompt that arrives immediately after spawn.
         const unlisten = await listen<string>(`pty_output_${id}`, (event) => {
-          if (termRef.current) termRef.current.write(event.payload);
+          if (termRef.current) {
+            // Converter \n sozinho (sem \r antes) para \r\n
+            // Preserva \r sozinho (usado por progress bars e TUI update-in-place)
+            // Preserva \r\n já existente
+            const cleaned = event.payload.replace(/(?<!\r)\n/g, '\r\n');
+            termRef.current.write(cleaned);
+          }
         });
         unlistenRef.current = unlisten;
 
@@ -475,28 +528,52 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
           if (ptyIdRef.current !== null) {
             invoke("write_pty", { id: ptyIdRef.current, data }).catch(() => { });
           }
-          // Track input buffer for autocomplete suggestions
+          // ── Buffer tracking for autocomplete suggestions ──────────────
+          // Reset buffer on ENTER (command submitted)
           if (data === "\r" || data === "\n") {
             inputBufferRef.current = "";
             suggestionRef.current = "";
             setSuggestion("");
-          } else if (data === "\x7f" || data === "\b") {
-            inputBufferRef.current = inputBufferRef.current.slice(0, -1);
-          } else if (data.length === 1 && data >= " ") {
-            inputBufferRef.current += data;
+            return;
           }
-          if (data === "\t" && suggestionRef.current) {
+          // Escape sequence detected (arrow keys, home, end, etc.) → reset buffer
+          if (data.startsWith("\x1b")) {
+            inputBufferRef.current = "";
+            suggestionRef.current = "";
+            setSuggestion("");
+            return;
+          }
+          // Tab pressed → shell will auto-complete
+          if (data === "\t") {
             suggestionRef.current = "";
             setSuggestion("");
             inputBufferRef.current = "";
             return;
           }
+          // Backspace / Delete
+          if (data === "\x7f" || data === "\b") {
+            inputBufferRef.current = inputBufferRef.current.slice(0, -1);
+          }
+          // Ctrl+U (line kill) → clear entire buffer
+          else if (data === "\x15") {
+            inputBufferRef.current = "";
+          }
+          // Ctrl+W (delete word backward)
+          else if (data === "\x17") {
+            inputBufferRef.current = inputBufferRef.current.replace(/\s*\S+\s*$/, "");
+          }
+          // Printable character (single char, not control)
+          else if (data.length === 1 && data >= " ") {
+            inputBufferRef.current += data;
+          }
+          // Update suggestion based on clean buffer
           const newSuggestion = getCommandSuggestion(inputBufferRef.current) || "";
           suggestionRef.current = newSuggestion;
           setSuggestion(newSuggestion);
         });
 
       } catch (err) {
+        setPtyLoading(false);
         // ── Simulated / fallback mode — PTY spawn failed ─────────────────
         term.writeln(`\x1b[31m╔═══════════════════════════════════════╗\x1b[0m`);
         term.writeln(`\x1b[31m║  EZZO: Falha ao iniciar shell real     ║\x1b[0m`);
@@ -606,7 +683,14 @@ function TerminalPane({ tab, active, settings }: PaneProps) {
         className="terminal-container"
         style={{ flex: 1, width: "100%" }}
         onMouseDown={() => { if (termRef.current) termRef.current.focus(); }}
-      />
+      >
+        {ptyLoading && (
+          <div className="terminal-loading-overlay">
+            <div className="terminal-loading-spinner" />
+            <span className="terminal-loading-text">A iniciar shell...</span>
+          </div>
+        )}
+      </div>
       {/* ─── Ghost Text Hint Bar ────────────────────────────────────────────────── */}
       {suggestion && inputBufferRef.current && (
         <div className="suggestion-bar">
@@ -728,9 +812,13 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet }: SnippetsPanel
   );
 }
 
-// ─── Command id counter ──────────────────────────────────────────────────────
-let cmdIdCounter = 0;
-function cmdId(): string { return `cmd-${++cmdIdCounter}`; }
+// ─── Command id counter (useRef no App para evitar estado global mutável) ──
+const cmdIdCounterRef = { current: 0 };
+function cmdId(counterRef: { current: number }): string { return `cmd-${++counterRef.current}`; }
+
+// ─── Refs globais (acedidos pelo TerminalPane via atalhos) ─────────────
+const onAddSnippetRef: { current: ((s: Snippet) => void) | null } = { current: null };
+const showSnippetsRef: { current: (() => void) | null } = { current: null };
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -747,7 +835,9 @@ export default function App() {
   if (isMonitorStandalone) {
     return (
       <div style={{ width: "100vw", height: "100vh", overflow: "hidden", background: "rgba(8, 8, 16, 0.95)" }}>
-        <SystemMonitor onClose={() => { invoke("close").catch(() => { }); }} standalone={true} />
+        <Suspense fallback={<div style={{ color: "rgba(148,163,184,0.5)", textAlign: "center", paddingTop: "40vh", fontFamily: "'Inter', sans-serif", fontSize: 13 }}>A iniciar monitor...</div>}>
+          <SystemMonitor onClose={() => { invoke("close").catch(() => { }); }} standalone={true} />
+        </Suspense>
       </div>
     );
   }
@@ -761,6 +851,7 @@ export default function App() {
   const [showSnippets, setShowSnippets] = useState(false);
   const [showMonitor, setShowMonitor] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem("ezzo-welcome-dismissed"));
   const [snippets, setSnippets] = useState<Snippet[]>(loadSnippets);
   const [splitMode, setSplitMode] = useState<"none" | "horizontal" | "vertical">("none");
   const [secondTabId, setSecondTabId] = useState<string | null>(null);
@@ -876,6 +967,16 @@ export default function App() {
     });
   }, []);
 
+  // Ligar refs globais para atalhos no TerminalPane (Ctrl+Shift+K)
+  useEffect(() => {
+    onAddSnippetRef.current = addSnippet;
+    showSnippetsRef.current = () => setShowSnippets(true);
+    return () => {
+      onAddSnippetRef.current = null;
+      showSnippetsRef.current = null;
+    };
+  }, [addSnippet]);
+
   // ─── CLI Args: open .bat file passed via "Open With" (executar só uma vez no arranque) ───
   useEffect(() => {
     invoke<string[]>("get_cli_args").then((args) => {
@@ -940,20 +1041,20 @@ export default function App() {
 
   // ─── Build command palette items ──────────────────────────────────────────
   const commandPaletteItems = useCallback(() => [
-    { id: cmdId(), category: "Geral", label: "Paleta de Comandos", shortcut: "Ctrl+Shift+P", icon: "search", action: () => setShowCommandPalette(true) },
-    { id: cmdId(), category: "Geral", label: "Definições", shortcut: "Ctrl+,", icon: "settings", action: () => { setShowSettings((v) => !v); } },
-    { id: cmdId(), category: "Geral", label: "Snippets", shortcut: "Ctrl+Shift+S", icon: "snippet", action: () => { setShowSnippets((v) => !v); } },
-    { id: cmdId(), category: "Geral", label: "Monitor do Sistema", icon: "monitor", action: () => { setShowMonitor((v) => !v); } },
-    { id: cmdId(), category: "Geral", label: "Abrir Monitor em Janela Separada", icon: "monitor", action: () => { invoke("open_monitor_window"); } },
-    { id: cmdId(), category: "Painéis", label: "Split Vertical", shortcut: "Ctrl+Shift+D", icon: "split", action: () => toggleSplit("vertical") },
-    { id: cmdId(), category: "Painéis", label: "Split Horizontal", shortcut: "Ctrl+Shift+H", icon: "split", action: () => toggleSplit("horizontal") },
-    { id: cmdId(), category: "Abas", label: "Nova Aba", shortcut: "Ctrl+Shift+N", icon: "tab", action: () => addTab() },
-    { id: cmdId(), category: "Abas", label: "Fechar Aba Actual", icon: "tab", action: () => { const t = tabs.find(t => t.id === activeId); if (t) { const evt = { stopPropagation: () => { } } as React.MouseEvent; closeTab(t.id, evt); } } },
-    { id: cmdId(), category: "Ferramentas", label: "Pesquisar no Terminal", shortcut: "Ctrl+F", icon: "search", action: () => { /* busca interna Ctrl+F */ } },
-    { id: cmdId(), category: "Janela", label: "Fechar Janela", icon: "window", action: () => invoke("close").catch(() => { }) },
-    { id: cmdId(), category: "Janela", label: "Minimizar", icon: "window", action: () => invoke("minimize").catch(() => { }) },
-    { id: cmdId(), category: "Janela", label: "Maximizar", icon: "window", action: () => invoke("maximize").catch(() => { }) },
-    { id: cmdId(), category: "Ajuda", label: "Atalhos de Teclado", icon: "help", action: () => { setShowCommandPalette(true); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Paleta de Comandos", shortcut: "Ctrl+Shift+P", icon: "search", action: () => setShowCommandPalette(true) },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Definições", shortcut: "Ctrl+,", icon: "settings", action: () => { setShowSettings((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Snippets", shortcut: "Ctrl+Shift+S", icon: "snippet", action: () => { setShowSnippets((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Monitor do Sistema", icon: "monitor", action: () => { setShowMonitor((v) => !v); } },
+    { id: cmdId(cmdIdCounterRef), category: "Geral", label: "Abrir Monitor em Janela Separada", icon: "monitor", action: () => { invoke("open_monitor_window"); } },
+    { id: cmdId(cmdIdCounterRef), category: "Painéis", label: "Split Vertical", shortcut: "Ctrl+Shift+D", icon: "split", action: () => toggleSplit("vertical") },
+    { id: cmdId(cmdIdCounterRef), category: "Painéis", label: "Split Horizontal", shortcut: "Ctrl+Shift+H", icon: "split", action: () => toggleSplit("horizontal") },
+    { id: cmdId(cmdIdCounterRef), category: "Abas", label: "Nova Aba", shortcut: "Ctrl+Shift+N", icon: "tab", action: () => addTab() },
+    { id: cmdId(cmdIdCounterRef), category: "Abas", label: "Fechar Aba Actual", icon: "tab", action: () => { const t = tabs.find(t => t.id === activeId); if (t) { const evt = { stopPropagation: () => { } } as React.MouseEvent; closeTab(t.id, evt); } } },
+    { id: cmdId(cmdIdCounterRef), category: "Ferramentas", label: "Pesquisar no Terminal", shortcut: "Ctrl+F", icon: "search", action: () => { /* busca interna Ctrl+F */ } },
+    { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Fechar Janela", icon: "window", action: () => invoke("close").catch(() => { }) },
+    { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Minimizar", icon: "window", action: () => invoke("minimize").catch(() => { }) },
+    { id: cmdId(cmdIdCounterRef), category: "Janela", label: "Maximizar", icon: "window", action: () => invoke("maximize").catch(() => { }) },
+    { id: cmdId(cmdIdCounterRef), category: "Ajuda", label: "Atalhos de Teclado", icon: "help", action: () => { setShowCommandPalette(true); } },
   ], [toggleSplit, addTab, activeId, tabs, closeTab]);
 
   // Keyboard shortcuts at app level
@@ -1141,9 +1242,22 @@ export default function App() {
 
 
         {showSettings && <SettingsPanel settings={settings} onChange={handleSettingsChange} onClose={() => setShowSettings(false)} />}
+        {showWelcome && (
+          <Suspense fallback={null}>
+            <WelcomeScreen onDismiss={() => { localStorage.setItem("ezzo-welcome-dismissed", "1"); setShowWelcome(false); }} />
+          </Suspense>
+        )}
         {showSnippets && <SnippetsPanel onRun={runSnippet} onClose={() => setShowSnippets(false)} snippets={snippets} onAddSnippet={addSnippet} />}
-        {showMonitor && <SystemMonitor onClose={() => setShowMonitor(false)} />}
-        {showCommandPalette && <CommandPalette commands={commandPaletteItems()} onClose={() => setShowCommandPalette(false)} />}
+        {showMonitor && (
+          <Suspense fallback={null}>
+            <SystemMonitor onClose={() => setShowMonitor(false)} />
+          </Suspense>
+        )}
+        {showCommandPalette && (
+          <Suspense fallback={null}>
+            <CommandPalette commands={commandPaletteItems()} onClose={() => setShowCommandPalette(false)} />
+          </Suspense>
+        )}
       </div>
 
       <div className="status-bar">

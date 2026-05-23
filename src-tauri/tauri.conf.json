@@ -33,12 +33,25 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "copyright": "Copyright (c) 2026 EZZO Digital Inc. Todos os direitos reservados.",
+    "publisher": "EZZO Digital Inc.",
+    "shortDescription": "EZZO Terminal - Terminal moderno e translucido para Windows",
+    "longDescription": "EZZO Terminal e um terminal moderno, elegante e translucido para Windows com suporte a CMD, PowerShell e WSL. Inclui multiplas abas, split de paineis, monitor de sistema integrado, snippets personalizaveis e temas de cores.",
+    "license": "MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      },
+      "wix": null
+    }
   }
 }

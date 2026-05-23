@@ -418,7 +418,41 @@ body {
 
 .xterm {
   height: 100%;
-  padding: 4px 6px;
+  padding: 0;  /* Removido padding para evitar quebra de layout em TUI/agentes CLI */
+}
+
+/* ─── Terminal Loading Overlay ─── */
+.terminal-loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(8, 8, 16, 0.7);
+  z-index: 10;
+  animation: fadeIn 0.15s ease;
+}
+
+.terminal-loading-spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(59, 130, 246, 0.15);
+  border-top-color: #3b82f6;
+  animation: spin 0.7s linear infinite;
+}
+
+.terminal-loading-text {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.5);
+  letter-spacing: 0.04em;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .xterm-viewport {

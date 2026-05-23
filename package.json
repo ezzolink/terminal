@@ -1,8 +1,14 @@
 {
-  "name": "tauri-app",
+  "name": "ezzo-terminal",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
+  "description": "EZZO Terminal - Terminal moderno, elegante e translucido para Windows",
+  "author": {
+    "name": "EZZO Digital Inc.",
+    "url": "https://ezzo.digital"
+  },
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
