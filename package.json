@@ -1,7 +1,7 @@
 {
   "name": "ezzo-terminal",
   "private": true,
-  "version": "1.6.2",
+  "version": "1.7.0",
   "type": "module",
   "description": "EZZO Terminal - Terminal moderno, elegante e translucido para Windows",
   "author": {

@@ -879,7 +879,9 @@ interface SnippetsPanelProps { onRun: (cmd: string) => void; onClose: () => void
 
 function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet, onSetSnippets }: SnippetsPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [adding, setAdding] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [newName, setNewName] = useState("");
   const [newCmd, setNewCmd] = useState("");
   const [newCat, setNewCat] = useState("System");
@@ -890,7 +892,25 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet, onSetSnippets }
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
-  const categories = [...new Set(snippets.map((s) => s.category))];
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === "Escape") {
+        if (searchQuery) { setSearchQuery(""); e.stopPropagation(); }
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [searchQuery]);
+
+  const q = searchQuery.toLowerCase();
+  const filtered = snippets.filter((s) =>
+    !q || s.name.toLowerCase().includes(q) || s.command.toLowerCase().includes(q)
+  );
+  const categories = [...new Set(filtered.map((s) => s.category))];
 
   const handleAdd = () => {
     if (!newName || !newCmd) return;
@@ -938,6 +958,9 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet, onSetSnippets }
           <button className="settings-close" onClick={onClose} title="Fechar snippets"><IconTabClose /></button>
         </div>
       </div>
+      <div style={{ padding: "0 10px 4px" }}>
+        <input ref={searchRef} className="snippet-input" placeholder="Pesquisar snippets... (Ctrl+F)" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ marginBottom: 0 }} />
+      </div>
       {adding && (
         <div className="settings-section" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
           <input className="snippet-input" placeholder="Nome..." value={newName} onChange={(e) => setNewName(e.target.value)} />
@@ -949,10 +972,13 @@ function SnippetsPanel({ onRun, onClose, snippets, onAddSnippet, onSetSnippets }
           <button className="snippet-add-btn" onClick={handleAdd}>Adicionar</button>
         </div>
       )}
+      {filtered.length === 0 && searchQuery && (
+        <div style={{ padding: "20px 14px", textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>Nenhum snippet encontrado</div>
+      )}
       {categories.map((cat) => (
         <div key={cat} className="snippet-category">
           <div className="snippet-cat-label">{cat}</div>
-          {snippets.filter((s) => s.category === cat).map((s) => (
+          {filtered.filter((s) => s.category === cat).map((s) => (
             <button key={s.id} className="snippet-item" onClick={() => { onRun(s.command); onClose(); }}>
               <span className="snippet-name">{s.name}</span>
               <span className="snippet-cmd">{s.command}</span>
